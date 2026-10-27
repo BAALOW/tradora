@@ -760,7 +760,7 @@ export default function LearningHub() {
             </Panel>
             <div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-bold"><span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><Play size={13} fill="currentColor" /></span> Continue Learning</h2><span className="flex items-center gap-1.5 text-xs text-blue-600">{refreshing && <RefreshCw size={12} className="animate-spin" />}{filteredVideos.length} videos</span></div>
             {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{hasDataRef.current ? 'Connection problem — showing your last saved data.' : error} <button onClick={() => loadData()} className="ml-2 font-semibold underline">Retry</button><p className="mt-1 text-xs">{error}</p></div>}
-            {loading ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{[1,2,3].map((n) => <div key={n} className="h-60 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={openViewNote} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
+            {loading ? <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{[1,2,3].map((n) => <div key={n} className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={openViewNote} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
           </div>
           <aside className="flex flex-col gap-3">
             <Panel className="p-4">
@@ -989,23 +989,22 @@ export default function LearningHub() {
 function Metric({ icon: Icon, label, value }) {
   return <div className="flex items-center gap-2 border-white/5 px-1 py-1 sm:border-r"><span className="text-blue-400"><Icon size={20} /></span><div><p className="text-[10px] text-blue-200">{label}</p><p className="text-sm font-bold text-white">{value}</p></div></div>
 }
-function Thumbnail({ video, small = false, large = false, compact = false }) {
+function Thumbnail({ video, small = false, large = false }) {
   const src = thumbnailFor(video)
   if (large) return <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-200"><Video size={38} /></div>}</div>
-  return <div className={`${small ? 'h-12 w-[72px]' : compact ? 'aspect-[2/1]' : 'aspect-video'} relative shrink-0 overflow-hidden rounded-lg bg-slate-900`}>{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-300"><Video size={small ? 16 : 26} /></div>}{!small && <span className="absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] text-white">{formatDuration(video.duration_seconds)}</span>}</div>
+  return <div className={`${small ? 'h-12 w-[72px]' : 'aspect-video'} relative shrink-0 overflow-hidden rounded-lg bg-slate-900`}>{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-300"><Video size={small ? 16 : 26} /></div>}{!small && <span className="absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] text-white">{formatDuration(video.duration_seconds)}</span>}</div>
 }
 function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, onViewNote, onEditNote, onEdit, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAllNotes, setShowAllNotes] = useState(false)
-  const [expandedNoteId, setExpandedNoteId] = useState(null)
   const deadline = deadlineInfo(video)
   const deadlineTone = deadline?.tone === 'danger' ? 'bg-red-50 text-red-700' : deadline?.tone === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-600'
   const visibleNotes = showAllNotes ? notes : notes.slice(0, 2)
-  return <article className="flex h-full flex-col rounded-xl border border-blue-100/80 bg-white p-2.5 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
-    <button onClick={onOpen} className="group block w-full text-left"><div className="relative overflow-hidden rounded-lg"><Thumbnail video={video} compact /><span className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white transition group-hover:bg-slate-950/20"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 opacity-0 shadow-lg transition group-hover:opacity-100"><Play size={16} fill="currentColor" /></span></span></div></button>
-    <div className="flex items-start gap-2 pt-2.5">
-      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700">{(video.channel || 'Y').slice(0,1).toUpperCase()}</div>
-      <button onClick={onOpen} className="min-w-0 flex-1 text-left"><h3 className="line-clamp-2 min-h-[2.5rem] text-xs font-semibold leading-5 text-slate-800">{video.title}</h3><p className="line-clamp-1 text-[10px] text-slate-400">{video.channel || 'YouTube'}</p></button>
+  return <article className="rounded-xl border border-blue-100/80 bg-white p-3 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
+    <button onClick={onOpen} className="group block w-full text-left"><div className="relative overflow-hidden rounded-lg"><Thumbnail video={video} /><span className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white transition group-hover:bg-slate-950/20"><span className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 opacity-0 shadow-lg transition group-hover:opacity-100"><Play size={17} fill="currentColor" /></span></span></div></button>
+    <div className="flex items-start gap-2 pt-3">
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700">{(video.channel || 'Y').slice(0,1).toUpperCase()}</div>
+      <button onClick={onOpen} className="min-w-0 flex-1 text-left"><h3 className="line-clamp-2 text-xs font-semibold leading-5 text-slate-800">{video.title}</h3><p className="mt-0.5 text-[10px] text-slate-400">{video.channel || 'YouTube'}</p></button>
       <button onClick={onFavorite} title={video.favorite ? 'Remove favorite' : 'Add favorite'} className={`rounded p-1 ${video.favorite ? 'text-rose-500' : 'text-slate-400 hover:text-rose-500'}`}><Heart size={15} fill={video.favorite ? 'currentColor' : 'none'} /></button>
       <div className="relative">
         <button onClick={() => setMenuOpen((o) => !o)} title="More options" className="rounded p-1 text-slate-400 hover:text-blue-600"><MoreVertical size={15} /></button>
@@ -1021,18 +1020,18 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
         )}
       </div>
     </div>
-    <div className="mt-1.5 flex flex-wrap gap-1.5">
-      <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">{video.category}</span>
-      <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] text-slate-600">{video.level || 'All levels'}</span>
-      {deadline && <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${deadlineTone}`}><CalendarClock size={11} /> {deadline.label}</span>}
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      <span className="rounded-full bg-blue-50 px-2 py-1 text-[10px] text-blue-700">{video.category}</span>
+      <span className="rounded-full bg-slate-50 px-2 py-1 text-[10px] text-slate-600">{video.level || 'All levels'}</span>
+      {deadline && <span className={`flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium ${deadlineTone}`}><CalendarClock size={11} /> {deadline.label}</span>}
     </div>
-    <div className="mt-2.5"><div className="mb-1 flex justify-between text-[10px] text-slate-400"><span>{video.completed ? 'Completed' : video.watched_seconds ? `Watched ${formatDuration(video.watched_seconds)} / ${formatDuration(video.duration_seconds)}` : 'Not started'}</span><span>{video.completed ? '100%' : `${video.progress_percent}%`}</span></div><ProgressLine value={video.completed ? 100 : video.progress_percent} /></div>
-    <button onClick={onOpen} className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700">{video.completed ? 'Review Video' : video.watched_seconds ? 'Continue Watching' : 'Start Learning'} <ChevronRight size={14} /></button>
-    <button onClick={onComplete} className="mt-1.5 w-full text-[10px] font-medium text-emerald-600 hover:text-emerald-700">{video.completed ? '✓ Completed' : 'Mark as completed'}</button>
+    <div className="mt-3"><div className="mb-1 flex justify-between text-[10px] text-slate-400"><span>{video.completed ? 'Completed' : video.watched_seconds ? `Watched ${formatDuration(video.watched_seconds)} / ${formatDuration(video.duration_seconds)}` : 'Not started'}</span><span>{video.completed ? '100%' : `${video.progress_percent}%`}</span></div><ProgressLine value={video.completed ? 100 : video.progress_percent} /></div>
+    <button onClick={onOpen} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white transition hover:bg-indigo-700">{video.completed ? 'Review Video' : video.watched_seconds ? 'Continue Watching' : 'Start Learning'} <ChevronRight size={14} /></button>
+    <button onClick={onComplete} className="mt-2 w-full text-[10px] font-medium text-emerald-600 hover:text-emerald-700">{video.completed ? '✓ Completed' : 'Mark as completed'}</button>
 
-    {/* Notes for THIS video only. Collapsed = first two lines (with "..."); click a note to read it in full, click again to fold it back. */}
-    <div className="mt-auto border-t border-slate-100 pt-2.5">
-      <div className="mb-1.5 flex items-center justify-between">
+    {/* Notes for THIS video only — take a note, open it, or edit it without leaving the card. */}
+    <div className="mt-3 border-t border-slate-100 pt-3">
+      <div className="mb-2 flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
           <StickyNote size={12} className="text-blue-600" /> Notes
           <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">{notes.length}</span>
@@ -1043,44 +1042,19 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
         <p className="text-[10px] text-slate-400">No notes for this video yet.</p>
       ) : (
         <div className="space-y-1.5">
-          {visibleNotes.map((note) => {
-            const expanded = expandedNoteId === note.id
-            const preview = note.content || ''
-            const hasBlocks = Array.isArray(note.blocks) && note.blocks.length > 0
-            const isLong = preview.length > 90 || preview.includes('\n')
-            return (
-              <div key={note.id} className="rounded-lg border border-slate-100 px-2 py-1.5" style={{ background: note.bg_color || '#ffffff' }}>
-                <div className="flex items-start gap-1">
-                  <button onClick={() => setExpandedNoteId(expanded ? null : note.id)} aria-expanded={expanded} className="min-w-0 flex-1 text-left">
-                    <span className="flex items-center gap-1.5">
-                      <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
-                      {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
-                    </span>
-                    {!expanded && <span className="line-clamp-2 block text-[10px] leading-4 text-slate-500">{preview || 'Image note'}</span>}
-                    <span className="mt-0.5 flex items-center justify-between text-[9px] text-slate-400">
-                      <span>{new Date(note.created_at).toLocaleDateString()}</span>
-                      {(isLong || expanded) && <span className="inline-flex items-center gap-0.5 font-medium text-blue-600">{expanded ? 'Show less' : 'Read more'}<ChevronDown size={10} className={expanded ? 'rotate-180 transition' : 'transition'} /></span>}
-                    </span>
-                  </button>
-                  <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
-                </div>
-                {expanded && (
-                  <div className="mt-1.5 space-y-1.5 border-t border-slate-100 pt-1.5">
-                    {hasBlocks ? note.blocks.map((b, i) => b.type === 'subtitle'
-                      ? <h4 key={i} className="text-[11px] font-bold text-slate-800">{b.text}</h4>
-                      : <div key={i} className="whitespace-pre-wrap text-[11px] leading-5 text-slate-700 [&_ol]:list-decimal [&_ol]:pl-4 [&_ul]:list-disc [&_ul]:pl-4" dangerouslySetInnerHTML={{ __html: b.text }} />
-                    ) : (
-                      <p className="whitespace-pre-wrap text-[11px] leading-5 text-slate-700">{preview || 'This note only contains images.'}</p>
-                    )}
-                    <div className="flex items-center justify-between pt-0.5">
-                      <button onClick={() => setExpandedNoteId(null)} className="text-[10px] font-medium text-slate-500 hover:text-slate-700">Collapse</button>
-                      <button onClick={() => onViewNote(note)} className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 hover:text-blue-700"><ExternalLink size={10} /> Open note &amp; images</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          {visibleNotes.map((note) => (
+            <div key={note.id} className="flex items-start gap-1.5 rounded-lg border border-slate-100 px-2.5 py-2" style={{ background: note.bg_color || '#ffffff' }}>
+              <button onClick={() => onViewNote(note)} className="min-w-0 flex-1 text-left">
+                <span className="flex items-center gap-1.5">
+                  <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
+                  {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
+                </span>
+                <span className="line-clamp-2 block text-[10px] leading-4 text-slate-500">{note.content || 'Image note'}</span>
+                <span className="mt-0.5 block text-[9px] text-slate-400">{new Date(note.created_at).toLocaleDateString()}</span>
+              </button>
+              <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
+            </div>
+          ))}
           {notes.length > 2 && (
             <button onClick={() => setShowAllNotes((v) => !v)} className="text-[10px] font-medium text-blue-600 hover:text-blue-700">{showAllNotes ? 'Show less' : `Show all ${notes.length} notes`}</button>
           )}
