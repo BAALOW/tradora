@@ -27,6 +27,7 @@ const emptyNoteBlock = () => ({ type: 'paragraph', text: '' })
 
 const CACHE_KEY = 'learning-hub-cache-v1'
 const REQUEST_TIMEOUT_MS = 12000
+const IMAGE_TIMEOUT_MS = 30000
 const MAX_ATTEMPTS = 3
 
 // IMPORTANT: the notes LIST query never selects the `images` column.
@@ -54,11 +55,11 @@ function writeCache(data) {
 // Runs one Supabase query with a timeout and automatic retries. A single
 // dropped HTTP/3 (QUIC) connection or a transient 500 no longer breaks
 // the whole page — the request is simply tried again on a fresh connection.
-async function fetchWithRetry(build) {
+async function fetchWithRetry(build, { timeoutMs = REQUEST_TIMEOUT_MS, attempts = MAX_ATTEMPTS } = {}) {
   let lastError
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const { data, error } = await build(controller.signal)
       clearTimeout(timer)
@@ -67,10 +68,21 @@ async function fetchWithRetry(build) {
     } catch (e) {
       clearTimeout(timer)
       lastError = e
-      if (attempt < MAX_ATTEMPTS - 1) await sleep(700 * (attempt + 1))
+      if (attempt < attempts - 1) await sleep(700 * (attempt + 1))
     }
   }
   throw lastError
+}
+
+// Loads the (potentially large) images of ONE note, with a longer
+// timeout and retries, so a slow/dropped request can't leave the
+// "Loading images…" spinner stuck forever.
+async function fetchNoteImages(noteId) {
+  const rows = await fetchWithRetry(
+    (signal) => supabase.from('learning_notes').select('images').eq('id', noteId).abortSignal(signal),
+    { timeoutMs: IMAGE_TIMEOUT_MS, attempts: 3 },
+  )
+  return rows[0]?.images || []
 }
 
 const formatDuration = (seconds = 0) => {
@@ -268,6 +280,7 @@ export default function LearningHub() {
   const [noteImportant, setNoteImportant] = useState(false)
   const [viewingNote, setViewingNote] = useState(null)
   const [viewImagesLoading, setViewImagesLoading] = useState(false)
+  const [viewImagesError, setViewImagesError] = useState(false)
   const [deletingNote, setDeletingNote] = useState(null)
   const [lightboxImage, setLightboxImage] = useState(null)
 
@@ -284,6 +297,8 @@ export default function LearningHub() {
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
   const editingNoteIdRef = useRef(null)
+  // Images already fetched for a note (by note id) — reopening is instant.
+  const noteImagesCache = useRef({})
 
   // Auth user id without a network round-trip every time.
   const getUserId = useCallback(async () => {
@@ -513,17 +528,28 @@ export default function LearningHub() {
       setNoteTextColor(existingNote.text_color || '#1F2937')
       setNoteBgColor(existingNote.bg_color || '#FFFFFF')
       setNoteImportant(!!existingNote.important)
+      const cachedImages = noteImagesCache.current[existingNote.id]
       if (existingNote.images !== undefined) {
         setNoteImages(existingNote.images || [])
+        setNoteImagesLoaded(true)
+      } else if (cachedImages) {
+        setNoteImages(cachedImages)
         setNoteImagesLoaded(true)
       } else {
         // Images are not part of the list query — load them for this note only.
         setNoteImages([])
         setNoteImagesLoaded(false)
-        const { data, error: imgError } = await supabase.from('learning_notes').select('images').eq('id', existingNote.id).maybeSingle()
-        if (editingNoteIdRef.current === existingNote.id) {
-          if (!imgError && data) { setNoteImages(data.images || []); setNoteImagesLoaded(true) }
-          else showToastRef.current({ type: 'error', title: 'Could not load note images', description: 'You can still edit the text. Existing images will be kept.' })
+        try {
+          const images = await fetchNoteImages(existingNote.id)
+          noteImagesCache.current[existingNote.id] = images
+          if (editingNoteIdRef.current === existingNote.id) {
+            setNoteImages(images)
+            setNoteImagesLoaded(true)
+          }
+        } catch {
+          if (editingNoteIdRef.current === existingNote.id) {
+            showToastRef.current({ type: 'error', title: 'Could not load note images', description: 'You can still edit the text. Existing images will be kept.' })
+          }
         }
       }
     } else {
@@ -542,12 +568,27 @@ export default function LearningHub() {
   const closeNoteModal = () => { setNoteModal(null); setEditingNoteId(null); editingNoteIdRef.current = null }
 
   const openViewNote = useCallback(async (note) => {
+    setViewImagesError(false)
+    const cached = noteImagesCache.current[note.id]
+    if (cached) {
+      setViewImagesLoading(false)
+      setViewingNote({ ...note, images: cached })
+      return
+    }
     setViewingNote(note)
-    if (note.images !== undefined) return
+    if (note.images !== undefined) { setViewImagesLoading(false); return }
     setViewImagesLoading(true)
-    const { data } = await supabase.from('learning_notes').select('images').eq('id', note.id).maybeSingle()
-    setViewImagesLoading(false)
-    if (data) setViewingNote((prev) => (prev && prev.id === note.id ? { ...prev, images: data.images || [] } : prev))
+    try {
+      const images = await fetchNoteImages(note.id)
+      noteImagesCache.current[note.id] = images
+      setViewingNote((prev) => (prev && prev.id === note.id ? { ...prev, images } : prev))
+      setViewImagesLoading(false)
+    } catch {
+      setViewingNote((prev) => {
+        if (prev && prev.id === note.id) { setViewImagesError(true); setViewImagesLoading(false) }
+        return prev
+      })
+    }
   }, [])
 
   const addNoteBlock = (type) => setNoteBlocks((b) => [...b, { type, text: '' }])
@@ -595,6 +636,8 @@ export default function LearningHub() {
     if (editingNoteId) {
       const { error: saveError } = await supabase.from('learning_notes').update(payload).eq('id', editingNoteId)
       if (saveError) { showToast({ type: 'error', title: 'Could not update note', description: saveError.message }); return }
+      // Images may have changed — drop the cached copy so it reloads fresh.
+      delete noteImagesCache.current[editingNoteId]
       showToast({ type: 'success', title: 'Note updated' })
     } else {
       const { error: saveError } = await supabase.from('learning_notes').insert({ user_id: userId, ...payload })
@@ -609,6 +652,7 @@ export default function LearningHub() {
     if (!deletingNote) return
     const { error: delError } = await supabase.from('learning_notes').delete().eq('id', deletingNote.id)
     if (delError) { showToast({ type: 'error', title: 'Could not delete note', description: delError.message }); setDeletingNote(null); return }
+    delete noteImagesCache.current[deletingNote.id]
     setDeletingNote(null)
     if (viewingNote?.id === deletingNote.id) setViewingNote(null)
     setNotes((list) => list.filter((n) => n.id !== deletingNote.id))
@@ -886,6 +930,12 @@ export default function LearningHub() {
         )}
         {!(viewingNote.blocks?.length) && viewingNote.content && <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{viewingNote.content}</p>}
         {viewImagesLoading && <p className="flex items-center gap-1.5 text-[11px] text-slate-400"><LoaderCircle size={12} className="animate-spin" /> Loading images…</p>}
+        {viewImagesError && !viewImagesLoading && (
+          <p className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+            Could not load the images for this note.
+            <button type="button" onClick={() => openViewNote(viewingNote)} className="font-semibold underline">Retry</button>
+          </p>
+        )}
         {viewingNote.images?.length > 0 && (
           <div className="grid grid-cols-3 gap-2 pt-2">
             {viewingNote.images.map((src, i) => (
@@ -1029,7 +1079,7 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
     <button onClick={onOpen} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white transition hover:bg-indigo-700">{video.completed ? 'Review Video' : video.watched_seconds ? 'Continue Watching' : 'Start Learning'} <ChevronRight size={14} /></button>
     <button onClick={onComplete} className="mt-2 w-full text-[10px] font-medium text-emerald-600 hover:text-emerald-700">{video.completed ? '✓ Completed' : 'Mark as completed'}</button>
 
-    {/* Notes for THIS video only — take a note, open it, or edit it without leaving the card. */}
+    {/* Notes for THIS video only — compact preview: title + first 3 lines then "...". Click a note to read the whole thing. */}
     <div className="mt-3 border-t border-slate-100 pt-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
@@ -1049,7 +1099,7 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
                   <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
                   {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
                 </span>
-                <span className="line-clamp-2 block text-[10px] leading-4 text-slate-500">{note.content || 'Image note'}</span>
+                <span className="line-clamp-3 block break-words text-[10px] leading-4 text-slate-500">{note.content || 'Image note'}</span>
                 <span className="mt-0.5 block text-[9px] text-slate-400">{new Date(note.created_at).toLocaleDateString()}</span>
               </button>
               <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
