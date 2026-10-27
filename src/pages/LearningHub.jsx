@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Search, Youtube, Play, CheckCircle2, Clock3, Flame, Video, BookOpen,
   Target, Plus, ChevronDown, ChevronRight, MoreVertical, StickyNote,
-  Sparkles, LoaderCircle, X, ExternalLink, Heart, RefreshCw, Filter,
+  Sparkles, LoaderCircle, X, ExternalLink, Heart, RefreshCw,
   Pencil, Trash2, CalendarClock,
 } from 'lucide-react'
 import Sidebar from '../components/layout/Sidebar'
@@ -22,6 +22,56 @@ const TEXT_COLOR_SWATCHES = ['#1F2937', '#DC2626', '#2563EB', '#16A34A', '#D9770
 
 const emptyVideoForm = { title: '', youtube_url: '', channel: '', category: '', duration_hours: '0', duration_minutes: '30', level: 'Beginner', thumbnail_url: '', description: '', deadline_date: '' }
 const emptyNoteBlock = () => ({ type: 'paragraph', text: '' })
+
+/* ---------------- Network helpers (retry + timeout + cache) ---------------- */
+
+const CACHE_KEY = 'learning-hub-cache-v1'
+const REQUEST_TIMEOUT_MS = 12000
+const MAX_ATTEMPTS = 3
+
+// IMPORTANT: the notes LIST query never selects the `images` column.
+// Images are stored as base64 and can be megabytes each — pulling them
+// for every note on every load is what caused the 500 / QUIC errors and
+// the endless skeleton. Images are fetched lazily, one note at a time,
+// only when a note is opened or edited.
+const NOTE_LIST_COLUMNS = 'id, user_id, video_id, title, note_title, title_color, content, blocks, text_color, bg_color, important, created_at, learning_videos(title, channel, category, youtube_url, thumbnail_url)'
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function readCache() {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || !Array.isArray(parsed.videos)) return null
+    return parsed
+  } catch { return null }
+}
+function writeCache(data) {
+  try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(data)) } catch { /* storage full / blocked — ignore */ }
+}
+
+// Runs one Supabase query with a timeout and automatic retries. A single
+// dropped HTTP/3 (QUIC) connection or a transient 500 no longer breaks
+// the whole page — the request is simply tried again on a fresh connection.
+async function fetchWithRetry(build) {
+  let lastError
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    try {
+      const { data, error } = await build(controller.signal)
+      clearTimeout(timer)
+      if (error) throw error
+      return data || []
+    } catch (e) {
+      clearTimeout(timer)
+      lastError = e
+      if (attempt < MAX_ATTEMPTS - 1) await sleep(700 * (attempt + 1))
+    }
+  }
+  throw lastError
+}
 
 const formatDuration = (seconds = 0) => {
   const n = Math.max(0, Number(seconds) || 0)
@@ -46,6 +96,31 @@ const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   reader.onload = () => resolve(reader.result)
   reader.onerror = reject
   reader.readAsDataURL(file)
+})
+// Shrinks screenshots before they are stored, so notes stay small and
+// load fast. Falls back to the original file if anything goes wrong.
+const compressImage = (file, maxSize = 1280, quality = 0.78) => new Promise((resolve, reject) => {
+  const url = URL.createObjectURL(file)
+  const img = new Image()
+  img.onload = () => {
+    try {
+      const scale = Math.min(1, maxSize / Math.max(img.width, img.height))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(img.width * scale))
+      canvas.height = Math.max(1, Math.round(img.height * scale))
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/jpeg', quality))
+    } catch {
+      URL.revokeObjectURL(url)
+      fileToDataUrl(file).then(resolve, reject)
+    }
+  }
+  img.onerror = () => { URL.revokeObjectURL(url); fileToDataUrl(file).then(resolve, reject) }
+  img.src = url
 })
 const htmlToPlainText = (html = '') => {
   const div = document.createElement('div')
@@ -151,11 +226,17 @@ export default function LearningHub() {
   const { accounts = [] } = useAccounts()
   const { showToast } = useToast()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [videos, setVideos] = useState([])
-  const [progressRows, setProgressRows] = useState([])
-  const [notes, setNotes] = useState([])
-  const [goals, setGoals] = useState([])
-  const [loading, setLoading] = useState(true)
+
+  // Last good data is cached for this browser session, so a refresh shows
+  // real numbers instantly instead of a skeleton + zeros while Supabase
+  // answers (or fails) in the background.
+  const [cache] = useState(readCache)
+  const [videos, setVideos] = useState(() => cache?.videos || [])
+  const [progressRows, setProgressRows] = useState(() => cache?.progressRows || [])
+  const [notes, setNotes] = useState(() => cache?.notes || [])
+  const [goals, setGoals] = useState(() => cache?.goals || [])
+  const [loading, setLoading] = useState(() => !cache)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [source, setSource] = useState('YouTube')
@@ -183,8 +264,10 @@ export default function LearningHub() {
   const [noteTextColor, setNoteTextColor] = useState('#1F2937')
   const [noteBgColor, setNoteBgColor] = useState('#FFFFFF')
   const [noteImages, setNoteImages] = useState([])
+  const [noteImagesLoaded, setNoteImagesLoaded] = useState(true)
   const [noteImportant, setNoteImportant] = useState(false)
   const [viewingNote, setViewingNote] = useState(null)
+  const [viewImagesLoading, setViewImagesLoading] = useState(false)
   const [deletingNote, setDeletingNote] = useState(null)
   const [lightboxImage, setLightboxImage] = useState(null)
 
@@ -193,66 +276,111 @@ export default function LearningHub() {
   const watchIntervalRef = useRef(null)
   const remindedRef = useRef(false)
 
-  const loadData = useCallback(async () => {
-    setLoading(true); setError('')
+  // Refs so long-lived callbacks (player interval, etc.) never read stale state.
+  const loadSeq = useRef(0)
+  const hasDataRef = useRef(!!cache)
+  const userIdRef = useRef(null)
+  const progressRef = useRef({})
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
+  const editingNoteIdRef = useRef(null)
+
+  // Auth user id without a network round-trip every time.
+  const getUserId = useCallback(async () => {
+    if (userIdRef.current) return userIdRef.current
     try {
-      const { data: videoData, error: videoError } = await supabase.from('learning_videos').select('*').order('created_at', { ascending: false })
-      if (videoError) throw videoError
-      const [{ data: progressData, error: progressError }, { data: noteData, error: noteError }, { data: goalData, error: goalError }] = await Promise.all([
-        supabase.from('learning_progress').select('*'),
-        supabase.from('learning_notes').select('*, learning_videos(title, channel, category, youtube_url, thumbnail_url)').order('created_at', { ascending: false }),
-        supabase.from('learning_goals').select('*').order('created_at', { ascending: false }),
-      ])
-      if (progressError) throw progressError
-      if (noteError) throw noteError
-      if (goalError) throw goalError
-      setVideos(videoData || [])
-      setProgressRows(progressData || [])
-      setNotes(noteData || [])
-      setGoals(goalData || [])
-    } catch (e) {
-      setError(e.message || 'Could not load Learning Hub data.')
-    } finally { setLoading(false) }
+      const { data } = await supabase.auth.getSession()
+      userIdRef.current = data?.session?.user?.id || null
+      if (!userIdRef.current) {
+        const { data: u } = await supabase.auth.getUser()
+        userIdRef.current = u?.user?.id || null
+      }
+    } catch { /* handled by caller */ }
+    return userIdRef.current
+  }, [])
+
+  const loadData = useCallback(async ({ silent = false } = {}) => {
+    const seq = ++loadSeq.current
+    // Skeleton only when there is truly nothing to show yet.
+    if (!silent && !hasDataRef.current) setLoading(true)
+    else setRefreshing(true)
+    setError('')
+
+    const results = await Promise.allSettled([
+      fetchWithRetry((signal) => supabase.from('learning_videos').select('*').order('created_at', { ascending: false }).abortSignal(signal)),
+      fetchWithRetry((signal) => supabase.from('learning_progress').select('*').abortSignal(signal)),
+      fetchWithRetry((signal) => supabase.from('learning_notes').select(NOTE_LIST_COLUMNS).order('created_at', { ascending: false }).abortSignal(signal)),
+      fetchWithRetry((signal) => supabase.from('learning_goals').select('*').order('created_at', { ascending: false }).abortSignal(signal)),
+    ])
+    if (seq !== loadSeq.current) return // a newer load superseded this one
+
+    const [v, p, n, g] = results
+    const failures = results.filter((r) => r.status === 'rejected')
+
+    // A failed query keeps the data we already have — it never wipes the
+    // page back to zeros.
+    if (v.status === 'fulfilled') { setVideos(v.value); hasDataRef.current = true }
+    if (p.status === 'fulfilled') setProgressRows(p.value)
+    if (n.status === 'fulfilled') setNotes(n.value)
+    if (g.status === 'fulfilled') setGoals(g.value)
+
+    if (failures.length === 0) {
+      writeCache({ videos: v.value, progressRows: p.value, notes: n.value, goals: g.value })
+    } else {
+      const reason = failures[0].reason
+      const message = reason?.name === 'AbortError' ? 'The request timed out.' : (reason?.message || 'Could not load Learning Hub data.')
+      setError(message)
+    }
+    setLoading(false)
+    setRefreshing(false)
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
   useEffect(() => { loadYoutubeIframeApi() }, [])
 
+  // If the connection drops and comes back, quietly refresh.
+  useEffect(() => {
+    const onOnline = () => loadData({ silent: true })
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [loadData])
+
   // Only the user's own videos — no hardcoded demo/seed content.
   const progressByVideo = useMemo(() => Object.fromEntries(progressRows.map((row) => [row.video_id, row])), [progressRows])
+  progressRef.current = progressByVideo
   const mergedVideos = useMemo(() => videos.map((video) => {
     const progress = progressByVideo[video.id]
     return { ...video, watched_seconds: progress?.watched_seconds || 0, completed: !!progress?.completed, favorite: !!progress?.favorite, progress_id: progress?.id || null, progress_percent: video.duration_seconds ? Math.min(100, Math.round(((progress?.watched_seconds || 0) / video.duration_seconds) * 100)) : 0 }
   }), [videos, progressByVideo])
 
-  // Keep the modal's activeVideo in sync once loadData() brings back
-  // fresh progress — otherwise the embedded player's "already watched"
-  // comparisons go stale after the first save.
+  // Keep the modal's activeVideo in sync once fresh progress arrives —
+  // otherwise the "Watched x / y" label goes stale after the first save.
   useEffect(() => {
     if (!activeVideo) return
     const fresh = mergedVideos.find((v) => v.id === activeVideo.id)
-    if (fresh && fresh.watched_seconds !== activeVideo.watched_seconds) setActiveVideo(fresh)
+    if (fresh && (fresh.watched_seconds !== activeVideo.watched_seconds || fresh.completed !== activeVideo.completed)) setActiveVideo(fresh)
   }, [mergedVideos]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Deadline reminder — checked once per visit to this page. There's no
   // backend/push setup here, so this is a best-effort in-app nudge: if
   // anything is due today, overdue, or due within a day, it shows a
-  // toast once loadData has finished.
+  // toast once the data is available.
   useEffect(() => {
     if (remindedRef.current || loading) return
+    if (mergedVideos.length === 0) return
     remindedRef.current = true
     const dueSoon = mergedVideos.filter((v) => {
       const info = deadlineInfo(v)
       return info && (info.tone === 'danger' || info.tone === 'warning')
     })
     if (dueSoon.length > 0) {
-      showToast({
+      showToastRef.current({
         type: 'info',
         title: dueSoon.length === 1 ? 'A video deadline is coming up' : `${dueSoon.length} video deadlines are coming up`,
         description: dueSoon.slice(0, 3).map((v) => v.title).join(', '),
       })
     }
-  }, [loading, mergedVideos, showToast])
+  }, [loading, mergedVideos])
 
   // Categories are entirely whatever the user has actually typed on
   // their own videos — no preset list baked into the UI anywhere.
@@ -295,18 +423,28 @@ export default function LearningHub() {
   const inProgressCount = mergedVideos.filter((video) => !video.completed && video.watched_seconds > 0).length
   const overallProgress = mergedVideos.length ? Math.round((completedCount / mergedVideos.length) * 100) : 0
 
-  const updateProgress = async (video, patch = {}) => {
-    const old = progressByVideo[video.id] || { watched_seconds: 0, completed: false, favorite: false }
-    const next = { user_id: (await supabase.auth.getUser()).data.user?.id, video_id: video.id, watched_seconds: old.watched_seconds || 0, completed: old.completed || false, favorite: old.favorite || false, ...patch, updated_at: new Date().toISOString() }
-    const { error: saveError } = await supabase.from('learning_progress').upsert(next, { onConflict: 'user_id,video_id' })
-    if (saveError) { showToast({ type: 'error', title: 'Could not update progress', description: saveError.message }); return }
-    await loadData()
-  }
+  // Saves progress and updates local state directly — no full reload, so
+  // the page never flashes back to a skeleton after a progress change.
+  const updateProgress = useCallback(async (video, patch = {}) => {
+    const old = progressRef.current[video.id] || { watched_seconds: 0, completed: false, favorite: false }
+    const userId = await getUserId()
+    if (!userId) { showToastRef.current({ type: 'error', title: 'Could not update progress', description: 'You are not signed in.' }); return }
+    const next = { user_id: userId, video_id: video.id, watched_seconds: old.watched_seconds || 0, completed: old.completed || false, favorite: old.favorite || false, ...patch, updated_at: new Date().toISOString() }
+    const { data, error: saveError } = await supabase.from('learning_progress').upsert(next, { onConflict: 'user_id,video_id' }).select().maybeSingle()
+    if (saveError) { showToastRef.current({ type: 'error', title: 'Could not update progress', description: saveError.message }); return }
+    const saved = data || { ...old, ...next }
+    setProgressRows((rows) => {
+      const idx = rows.findIndex((r) => r.video_id === video.id)
+      if (idx >= 0) { const copy = rows.slice(); copy[idx] = { ...rows[idx], ...saved }; return copy }
+      return [...rows, saved]
+    })
+  }, [getUserId])
 
-  const markCompleted = async (video) => {
-    await updateProgress(video, { completed: true, watched_seconds: Number(video.duration_seconds) || video.watched_seconds || 0 })
-    showToast({ type: 'success', title: 'Video completed', description: 'Your learning progress has been updated.' })
-  }
+  const markCompleted = useCallback(async (video) => {
+    const known = progressRef.current[video.id]?.watched_seconds || 0
+    await updateProgress(video, { completed: true, watched_seconds: Number(video.duration_seconds) || known })
+    showToastRef.current({ type: 'success', title: 'Video completed', description: 'Your learning progress has been updated.' })
+  }, [updateProgress])
 
   /* ---------------- Embedded YouTube player: real watch-time tracking ---------------- */
 
@@ -321,21 +459,24 @@ export default function LearningHub() {
     if (!videoId) return
 
     let cancelled = false
+    const videoSnapshot = activeVideo
     const saveCurrentTime = () => {
       if (!playerRef.current || typeof playerRef.current.getCurrentTime !== 'function') return
       const t = Math.floor(playerRef.current.getCurrentTime())
-      if (t > (activeVideo.watched_seconds || 0)) updateProgress(activeVideo, { watched_seconds: t })
+      const known = progressRef.current[videoSnapshot.id]?.watched_seconds || 0
+      if (t > known) updateProgress(videoSnapshot, { watched_seconds: t })
     }
 
     const initPlayer = () => {
       if (cancelled || !window.YT) return
-      playerRef.current = new window.YT.Player(`yt-player-${activeVideo.id}`, {
+      playerRef.current = new window.YT.Player(`yt-player-${videoSnapshot.id}`, {
         videoId,
-        playerVars: { rel: 0 },
+        playerVars: { rel: 0, origin: window.location.origin },
         events: {
           onReady: () => {
-            if (activeVideo.watched_seconds > 5) {
-              try { playerRef.current.seekTo(activeVideo.watched_seconds, true) } catch { /* no-op */ }
+            const known = progressRef.current[videoSnapshot.id]?.watched_seconds || 0
+            if (known > 5) {
+              try { playerRef.current.seekTo(known, true) } catch { /* no-op */ }
             }
           },
           onStateChange: (e) => {
@@ -344,7 +485,7 @@ export default function LearningHub() {
               watchIntervalRef.current = setInterval(saveCurrentTime, 10000)
             } else {
               if (watchIntervalRef.current) { clearInterval(watchIntervalRef.current); watchIntervalRef.current = null }
-              if (e.data === window.YT.PlayerState.ENDED) markCompleted(activeVideo)
+              if (e.data === window.YT.PlayerState.ENDED) markCompleted(videoSnapshot)
               else saveCurrentTime()
             }
           },
@@ -361,18 +502,32 @@ export default function LearningHub() {
 
   /* ---------------- Notes (rich editor, per-video, editable/deletable) ---------------- */
 
-  const openNoteModal = (context, existingNote = null) => {
+  const openNoteModal = async (context, existingNote = null) => {
     setNoteModal(context)
     if (existingNote) {
+      editingNoteIdRef.current = existingNote.id
       setEditingNoteId(existingNote.id)
       setNoteTitleText(existingNote.note_title || '')
       setNoteTitleColor(existingNote.title_color || '#111827')
       setNoteBlocks(Array.isArray(existingNote.blocks) && existingNote.blocks.length ? existingNote.blocks : [emptyNoteBlock()])
       setNoteTextColor(existingNote.text_color || '#1F2937')
       setNoteBgColor(existingNote.bg_color || '#FFFFFF')
-      setNoteImages(existingNote.images || [])
       setNoteImportant(!!existingNote.important)
+      if (existingNote.images !== undefined) {
+        setNoteImages(existingNote.images || [])
+        setNoteImagesLoaded(true)
+      } else {
+        // Images are not part of the list query — load them for this note only.
+        setNoteImages([])
+        setNoteImagesLoaded(false)
+        const { data, error: imgError } = await supabase.from('learning_notes').select('images').eq('id', existingNote.id).maybeSingle()
+        if (editingNoteIdRef.current === existingNote.id) {
+          if (!imgError && data) { setNoteImages(data.images || []); setNoteImagesLoaded(true) }
+          else showToastRef.current({ type: 'error', title: 'Could not load note images', description: 'You can still edit the text. Existing images will be kept.' })
+        }
+      }
     } else {
+      editingNoteIdRef.current = null
       setEditingNoteId(null)
       setNoteTitleText('')
       setNoteTitleColor('#111827')
@@ -380,16 +535,28 @@ export default function LearningHub() {
       setNoteTextColor('#1F2937')
       setNoteBgColor('#FFFFFF')
       setNoteImages([])
+      setNoteImagesLoaded(true)
       setNoteImportant(false)
     }
   }
+  const closeNoteModal = () => { setNoteModal(null); setEditingNoteId(null); editingNoteIdRef.current = null }
+
+  const openViewNote = useCallback(async (note) => {
+    setViewingNote(note)
+    if (note.images !== undefined) return
+    setViewImagesLoading(true)
+    const { data } = await supabase.from('learning_notes').select('images').eq('id', note.id).maybeSingle()
+    setViewImagesLoading(false)
+    if (data) setViewingNote((prev) => (prev && prev.id === note.id ? { ...prev, images: data.images || [] } : prev))
+  }, [])
+
   const addNoteBlock = (type) => setNoteBlocks((b) => [...b, { type, text: '' }])
   const updateNoteBlock = (i, text) => setNoteBlocks((b) => b.map((blk, idx) => (idx === i ? { ...blk, text } : blk)))
   const removeNoteBlock = (i) => setNoteBlocks((b) => (b.length > 1 ? b.filter((_, idx) => idx !== i) : b))
   const handleNoteImageUpload = async (e) => {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
-    const dataUrls = await Promise.all(files.map(fileToDataUrl))
+    const dataUrls = await Promise.all(files.map((f) => compressImage(f).catch(() => fileToDataUrl(f))))
     setNoteImages((prev) => [...prev, ...dataUrls])
     e.target.value = ''
   }
@@ -402,9 +569,9 @@ export default function LearningHub() {
 
   const saveNote = async (e) => {
     e.preventDefault()
-    const user = (await supabase.auth.getUser()).data.user
+    const userId = await getUserId()
     const cleanBlocks = noteBlocks.filter((b) => htmlToPlainText(b.text).trim())
-    if (!user || (!cleanBlocks.length && !noteImages.length)) {
+    if (!userId || (!cleanBlocks.length && !noteImages.length)) {
       showToast({ type: 'error', title: 'Write something first', description: 'Add at least one paragraph or image before saving.' })
       return
     }
@@ -419,22 +586,23 @@ export default function LearningHub() {
       blocks: cleanBlocks,
       text_color: noteTextColor,
       bg_color: noteBgColor,
-      images: noteImages,
       important: noteImportant,
     }
+    // When editing and the existing images never finished loading, leave
+    // the `images` column untouched so they can't be overwritten with [].
+    if (!editingNoteId || noteImagesLoaded) payload.images = noteImages
 
     if (editingNoteId) {
       const { error: saveError } = await supabase.from('learning_notes').update(payload).eq('id', editingNoteId)
       if (saveError) { showToast({ type: 'error', title: 'Could not update note', description: saveError.message }); return }
       showToast({ type: 'success', title: 'Note updated' })
     } else {
-      const { error: saveError } = await supabase.from('learning_notes').insert({ user_id: user.id, ...payload })
+      const { error: saveError } = await supabase.from('learning_notes').insert({ user_id: userId, ...payload })
       if (saveError) { showToast({ type: 'error', title: 'Could not save note', description: saveError.message }); return }
       showToast({ type: 'success', title: 'Note saved', description: 'Your learning note was saved.' })
     }
-    setNoteModal(null)
-    setEditingNoteId(null)
-    await loadData()
+    closeNoteModal()
+    await loadData({ silent: true })
   }
 
   const confirmDeleteNote = async () => {
@@ -443,17 +611,18 @@ export default function LearningHub() {
     if (delError) { showToast({ type: 'error', title: 'Could not delete note', description: delError.message }); setDeletingNote(null); return }
     setDeletingNote(null)
     if (viewingNote?.id === deletingNote.id) setViewingNote(null)
-    await loadData()
+    setNotes((list) => list.filter((n) => n.id !== deletingNote.id))
+    await loadData({ silent: true })
     showToast({ type: 'success', title: 'Note deleted' })
   }
 
   const saveGoal = async (e) => {
     e.preventDefault()
-    const user = (await supabase.auth.getUser()).data.user
-    if (!user || !goalTitle.trim()) return
-    const { error: saveError } = await supabase.from('learning_goals').insert({ user_id: user.id, title: goalTitle.trim(), target_videos: Math.max(1, Number(goalTarget) || 1), completed_videos: 0 })
+    const userId = await getUserId()
+    if (!userId || !goalTitle.trim()) return
+    const { error: saveError } = await supabase.from('learning_goals').insert({ user_id: userId, title: goalTitle.trim(), target_videos: Math.max(1, Number(goalTarget) || 1), completed_videos: 0 })
     if (saveError) { showToast({ type: 'error', title: 'Could not save goal', description: saveError.message }); return }
-    setGoalModal(false); setGoalTitle(''); setGoalTarget('5'); await loadData()
+    setGoalModal(false); setGoalTitle(''); setGoalTarget('5'); await loadData({ silent: true })
   }
 
   /* ---------------- Videos: add / edit / delete ---------------- */
@@ -510,8 +679,8 @@ export default function LearningHub() {
 
   const saveVideo = async (e) => {
     e.preventDefault()
-    const user = (await supabase.auth.getUser()).data.user
-    if (!user || !videoForm.title.trim() || !videoForm.youtube_url.trim()) return
+    const userId = await getUserId()
+    if (!userId || !videoForm.title.trim() || !videoForm.youtube_url.trim()) return
     const payload = {
       title: videoForm.title.trim(),
       youtube_url: videoForm.youtube_url.trim(),
@@ -529,21 +698,23 @@ export default function LearningHub() {
       if (saveError) { showToast({ type: 'error', title: 'Could not update video', description: saveError.message }); return }
       showToast({ type: 'success', title: 'Video updated' })
     } else {
-      const { error: saveError } = await supabase.from('learning_videos').insert({ user_id: user.id, ...payload })
+      const { error: saveError } = await supabase.from('learning_videos').insert({ user_id: userId, ...payload })
       if (saveError) { showToast({ type: 'error', title: 'Could not add video', description: saveError.message }); return }
       showToast({ type: 'success', title: 'Video added', description: 'The video is now in your Learning Hub.' })
     }
     closeVideoModal()
-    await loadData()
+    await loadData({ silent: true })
   }
 
   const confirmDeleteVideo = async () => {
     if (!deletingVideo) return
     const { error: delError } = await supabase.from('learning_videos').delete().eq('id', deletingVideo.id)
     if (delError) { showToast({ type: 'error', title: 'Could not delete video', description: delError.message }); setDeletingVideo(null); return }
+    const removedId = deletingVideo.id
     setDeletingVideo(null)
-    if (activeVideo?.id === deletingVideo.id) setActiveVideo(null)
-    await loadData()
+    if (activeVideo?.id === removedId) setActiveVideo(null)
+    setVideos((list) => list.filter((v) => v.id !== removedId))
+    await loadData({ silent: true })
     showToast({ type: 'success', title: 'Video deleted' })
   }
 
@@ -587,9 +758,9 @@ export default function LearningHub() {
                 <p className="pt-3 text-xs text-slate-400">Categories you type on your videos will show up here as quick filters.</p>
               )}
             </Panel>
-            <div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-bold"><span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><Play size={13} fill="currentColor" /></span> Continue Learning</h2><span className="text-xs text-blue-600">{filteredVideos.length} videos</span></div>
-            {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error} <button onClick={loadData} className="ml-2 underline">Retry</button><p className="mt-1 text-xs">Check that the Learning Hub SQL has been run in Supabase.</p></div>}
-            {loading ? <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{[1,2,3].map((n) => <div key={n} className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={(note) => setViewingNote(note)} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
+            <div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-bold"><span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><Play size={13} fill="currentColor" /></span> Continue Learning</h2><span className="flex items-center gap-1.5 text-xs text-blue-600">{refreshing && <RefreshCw size={12} className="animate-spin" />}{filteredVideos.length} videos</span></div>
+            {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{hasDataRef.current ? 'Connection problem — showing your last saved data.' : error} <button onClick={() => loadData()} className="ml-2 font-semibold underline">Retry</button><p className="mt-1 text-xs">{error}</p></div>}
+            {loading ? <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{[1,2,3].map((n) => <div key={n} className="h-60 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={openViewNote} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
           </div>
           <aside className="flex flex-col gap-3">
             <Panel className="p-4">
@@ -631,7 +802,7 @@ export default function LearningHub() {
           ) : (
             <div className="flex flex-col gap-2">
               {videoNotes(activeVideo.id).map((n) => (
-                <button key={n.id} onClick={() => setViewingNote(n)} className="flex items-center justify-between gap-2 rounded-lg border border-slate-100 px-3 py-2 text-left hover:bg-slate-50">
+                <button key={n.id} onClick={() => openViewNote(n)} className="flex items-center justify-between gap-2 rounded-lg border border-slate-100 px-3 py-2 text-left hover:bg-slate-50">
                   <span className="line-clamp-1 text-xs font-medium" style={{ color: n.title_color || '#334155' }}>{n.note_title || 'Note'} <span className="font-normal text-slate-400">· {new Date(n.created_at).toLocaleDateString()}</span></span>
                   <ChevronRight size={14} className="shrink-0 text-slate-400" />
                 </button>
@@ -642,7 +813,7 @@ export default function LearningHub() {
       </div>
     </Modal>}
 
-    {noteModal && <Modal title={editingNoteId ? 'Edit Note' : 'Save Learning Note'} onClose={() => { setNoteModal(null); setEditingNoteId(null) }}>
+    {noteModal && <Modal title={editingNoteId ? 'Edit Note' : 'Save Learning Note'} onClose={closeNoteModal}>
       <form onSubmit={saveNote} className="space-y-4">
         <p className="text-xs text-slate-500">{noteModal.title || 'General learning note'}</p>
 
@@ -688,8 +859,8 @@ export default function LearningHub() {
           </div>
         </div>
 
-        <label className="block text-xs font-medium">Images / Screenshots
-          <input type="file" accept="image/*" multiple onChange={handleNoteImageUpload} className="mt-1 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium" />
+        <label className="block text-xs font-medium">Images / Screenshots {!noteImagesLoaded && <span className="ml-1 inline-flex items-center gap-1 font-normal text-slate-400"><LoaderCircle size={11} className="animate-spin" /> Loading existing images…</span>}
+          <input type="file" accept="image/*" multiple disabled={!noteImagesLoaded} onChange={handleNoteImageUpload} className="mt-1 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium disabled:opacity-50" />
         </label>
         {noteImages.length > 0 && (
           <div className="grid grid-cols-4 gap-2">
@@ -703,7 +874,7 @@ export default function LearningHub() {
         )}
 
         <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={noteImportant} onChange={(e) => setNoteImportant(e.target.checked)} /> Mark as important</label>
-        <div className="flex justify-end gap-2"><button type="button" onClick={() => { setNoteModal(null); setEditingNoteId(null) }} className="rounded-lg border px-4 py-2 text-sm">Cancel</button><button className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white">{editingNoteId ? 'Save Changes' : 'Save Note'}</button></div>
+        <div className="flex justify-end gap-2"><button type="button" onClick={closeNoteModal} className="rounded-lg border px-4 py-2 text-sm">Cancel</button><button className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white">{editingNoteId ? 'Save Changes' : 'Save Note'}</button></div>
       </form>
     </Modal>}
 
@@ -714,6 +885,7 @@ export default function LearningHub() {
           : <div key={i} className="whitespace-pre-wrap text-sm leading-6 text-slate-700 [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5" dangerouslySetInnerHTML={{ __html: b.text }} />
         )}
         {!(viewingNote.blocks?.length) && viewingNote.content && <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{viewingNote.content}</p>}
+        {viewImagesLoading && <p className="flex items-center gap-1.5 text-[11px] text-slate-400"><LoaderCircle size={12} className="animate-spin" /> Loading images…</p>}
         {viewingNote.images?.length > 0 && (
           <div className="grid grid-cols-3 gap-2 pt-2">
             {viewingNote.images.map((src, i) => (
@@ -817,22 +989,23 @@ export default function LearningHub() {
 function Metric({ icon: Icon, label, value }) {
   return <div className="flex items-center gap-2 border-white/5 px-1 py-1 sm:border-r"><span className="text-blue-400"><Icon size={20} /></span><div><p className="text-[10px] text-blue-200">{label}</p><p className="text-sm font-bold text-white">{value}</p></div></div>
 }
-function Thumbnail({ video, small = false, large = false }) {
+function Thumbnail({ video, small = false, large = false, compact = false }) {
   const src = thumbnailFor(video)
   if (large) return <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-200"><Video size={38} /></div>}</div>
-  return <div className={`${small ? 'h-12 w-[72px]' : 'aspect-video'} relative shrink-0 overflow-hidden rounded-lg bg-slate-900`}>{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-300"><Video size={small ? 16 : 26} /></div>}{!small && <span className="absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] text-white">{formatDuration(video.duration_seconds)}</span>}</div>
+  return <div className={`${small ? 'h-12 w-[72px]' : compact ? 'aspect-[2/1]' : 'aspect-video'} relative shrink-0 overflow-hidden rounded-lg bg-slate-900`}>{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-300"><Video size={small ? 16 : 26} /></div>}{!small && <span className="absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] text-white">{formatDuration(video.duration_seconds)}</span>}</div>
 }
 function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, onViewNote, onEditNote, onEdit, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAllNotes, setShowAllNotes] = useState(false)
+  const [expandedNoteId, setExpandedNoteId] = useState(null)
   const deadline = deadlineInfo(video)
   const deadlineTone = deadline?.tone === 'danger' ? 'bg-red-50 text-red-700' : deadline?.tone === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-600'
   const visibleNotes = showAllNotes ? notes : notes.slice(0, 2)
-  return <article className="rounded-xl border border-blue-100/80 bg-white p-3 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
-    <button onClick={onOpen} className="group block w-full text-left"><div className="relative overflow-hidden rounded-lg"><Thumbnail video={video} /><span className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white transition group-hover:bg-slate-950/20"><span className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 opacity-0 shadow-lg transition group-hover:opacity-100"><Play size={17} fill="currentColor" /></span></span></div></button>
-    <div className="flex items-start gap-2 pt-3">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700">{(video.channel || 'Y').slice(0,1).toUpperCase()}</div>
-      <button onClick={onOpen} className="min-w-0 flex-1 text-left"><h3 className="line-clamp-2 text-xs font-semibold leading-5 text-slate-800">{video.title}</h3><p className="mt-0.5 text-[10px] text-slate-400">{video.channel || 'YouTube'}</p></button>
+  return <article className="flex h-full flex-col rounded-xl border border-blue-100/80 bg-white p-2.5 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
+    <button onClick={onOpen} className="group block w-full text-left"><div className="relative overflow-hidden rounded-lg"><Thumbnail video={video} compact /><span className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white transition group-hover:bg-slate-950/20"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 opacity-0 shadow-lg transition group-hover:opacity-100"><Play size={16} fill="currentColor" /></span></span></div></button>
+    <div className="flex items-start gap-2 pt-2.5">
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700">{(video.channel || 'Y').slice(0,1).toUpperCase()}</div>
+      <button onClick={onOpen} className="min-w-0 flex-1 text-left"><h3 className="line-clamp-2 min-h-[2.5rem] text-xs font-semibold leading-5 text-slate-800">{video.title}</h3><p className="line-clamp-1 text-[10px] text-slate-400">{video.channel || 'YouTube'}</p></button>
       <button onClick={onFavorite} title={video.favorite ? 'Remove favorite' : 'Add favorite'} className={`rounded p-1 ${video.favorite ? 'text-rose-500' : 'text-slate-400 hover:text-rose-500'}`}><Heart size={15} fill={video.favorite ? 'currentColor' : 'none'} /></button>
       <div className="relative">
         <button onClick={() => setMenuOpen((o) => !o)} title="More options" className="rounded p-1 text-slate-400 hover:text-blue-600"><MoreVertical size={15} /></button>
@@ -848,18 +1021,18 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
         )}
       </div>
     </div>
-    <div className="mt-2 flex flex-wrap gap-1.5">
-      <span className="rounded-full bg-blue-50 px-2 py-1 text-[10px] text-blue-700">{video.category}</span>
-      <span className="rounded-full bg-slate-50 px-2 py-1 text-[10px] text-slate-600">{video.level || 'All levels'}</span>
-      {deadline && <span className={`flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium ${deadlineTone}`}><CalendarClock size={11} /> {deadline.label}</span>}
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">{video.category}</span>
+      <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] text-slate-600">{video.level || 'All levels'}</span>
+      {deadline && <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${deadlineTone}`}><CalendarClock size={11} /> {deadline.label}</span>}
     </div>
-    <div className="mt-3"><div className="mb-1 flex justify-between text-[10px] text-slate-400"><span>{video.completed ? 'Completed' : video.watched_seconds ? `Watched ${formatDuration(video.watched_seconds)} / ${formatDuration(video.duration_seconds)}` : 'Not started'}</span><span>{video.completed ? '100%' : `${video.progress_percent}%`}</span></div><ProgressLine value={video.completed ? 100 : video.progress_percent} /></div>
-    <button onClick={onOpen} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white transition hover:bg-indigo-700">{video.completed ? 'Review Video' : video.watched_seconds ? 'Continue Watching' : 'Start Learning'} <ChevronRight size={14} /></button>
-    <button onClick={onComplete} className="mt-2 w-full text-[10px] font-medium text-emerald-600 hover:text-emerald-700">{video.completed ? '✓ Completed' : 'Mark as completed'}</button>
+    <div className="mt-2.5"><div className="mb-1 flex justify-between text-[10px] text-slate-400"><span>{video.completed ? 'Completed' : video.watched_seconds ? `Watched ${formatDuration(video.watched_seconds)} / ${formatDuration(video.duration_seconds)}` : 'Not started'}</span><span>{video.completed ? '100%' : `${video.progress_percent}%`}</span></div><ProgressLine value={video.completed ? 100 : video.progress_percent} /></div>
+    <button onClick={onOpen} className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700">{video.completed ? 'Review Video' : video.watched_seconds ? 'Continue Watching' : 'Start Learning'} <ChevronRight size={14} /></button>
+    <button onClick={onComplete} className="mt-1.5 w-full text-[10px] font-medium text-emerald-600 hover:text-emerald-700">{video.completed ? '✓ Completed' : 'Mark as completed'}</button>
 
-    {/* Notes for THIS video only — take a note, open it, or edit it without leaving the card. */}
-    <div className="mt-3 border-t border-slate-100 pt-3">
-      <div className="mb-2 flex items-center justify-between">
+    {/* Notes for THIS video only. Collapsed = first two lines (with "..."); click a note to read it in full, click again to fold it back. */}
+    <div className="mt-auto border-t border-slate-100 pt-2.5">
+      <div className="mb-1.5 flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600">
           <StickyNote size={12} className="text-blue-600" /> Notes
           <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">{notes.length}</span>
@@ -870,19 +1043,44 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
         <p className="text-[10px] text-slate-400">No notes for this video yet.</p>
       ) : (
         <div className="space-y-1.5">
-          {visibleNotes.map((note) => (
-            <div key={note.id} className="flex items-start gap-1.5 rounded-lg border border-slate-100 px-2.5 py-2" style={{ background: note.bg_color || '#ffffff' }}>
-              <button onClick={() => onViewNote(note)} className="min-w-0 flex-1 text-left">
-                <span className="flex items-center gap-1.5">
-                  <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
-                  {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
-                </span>
-                <span className="line-clamp-2 block text-[10px] leading-4 text-slate-500">{note.content || (note.images?.length ? `${note.images.length} image${note.images.length > 1 ? 's' : ''}` : '')}</span>
-                <span className="mt-0.5 block text-[9px] text-slate-400">{new Date(note.created_at).toLocaleDateString()}</span>
-              </button>
-              <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
-            </div>
-          ))}
+          {visibleNotes.map((note) => {
+            const expanded = expandedNoteId === note.id
+            const preview = note.content || ''
+            const hasBlocks = Array.isArray(note.blocks) && note.blocks.length > 0
+            const isLong = preview.length > 90 || preview.includes('\n')
+            return (
+              <div key={note.id} className="rounded-lg border border-slate-100 px-2 py-1.5" style={{ background: note.bg_color || '#ffffff' }}>
+                <div className="flex items-start gap-1">
+                  <button onClick={() => setExpandedNoteId(expanded ? null : note.id)} aria-expanded={expanded} className="min-w-0 flex-1 text-left">
+                    <span className="flex items-center gap-1.5">
+                      <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
+                      {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
+                    </span>
+                    {!expanded && <span className="line-clamp-2 block text-[10px] leading-4 text-slate-500">{preview || 'Image note'}</span>}
+                    <span className="mt-0.5 flex items-center justify-between text-[9px] text-slate-400">
+                      <span>{new Date(note.created_at).toLocaleDateString()}</span>
+                      {(isLong || expanded) && <span className="inline-flex items-center gap-0.5 font-medium text-blue-600">{expanded ? 'Show less' : 'Read more'}<ChevronDown size={10} className={expanded ? 'rotate-180 transition' : 'transition'} /></span>}
+                    </span>
+                  </button>
+                  <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
+                </div>
+                {expanded && (
+                  <div className="mt-1.5 space-y-1.5 border-t border-slate-100 pt-1.5">
+                    {hasBlocks ? note.blocks.map((b, i) => b.type === 'subtitle'
+                      ? <h4 key={i} className="text-[11px] font-bold text-slate-800">{b.text}</h4>
+                      : <div key={i} className="whitespace-pre-wrap text-[11px] leading-5 text-slate-700 [&_ol]:list-decimal [&_ol]:pl-4 [&_ul]:list-disc [&_ul]:pl-4" dangerouslySetInnerHTML={{ __html: b.text }} />
+                    ) : (
+                      <p className="whitespace-pre-wrap text-[11px] leading-5 text-slate-700">{preview || 'This note only contains images.'}</p>
+                    )}
+                    <div className="flex items-center justify-between pt-0.5">
+                      <button onClick={() => setExpandedNoteId(null)} className="text-[10px] font-medium text-slate-500 hover:text-slate-700">Collapse</button>
+                      <button onClick={() => onViewNote(note)} className="inline-flex items-center gap-1 text-[10px] font-medium text-blue-600 hover:text-blue-700"><ExternalLink size={10} /> Open note &amp; images</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
           {notes.length > 2 && (
             <button onClick={() => setShowAllNotes((v) => !v)} className="text-[10px] font-medium text-blue-600 hover:text-blue-700">{showAllNotes ? 'Show less' : `Show all ${notes.length} notes`}</button>
           )}
