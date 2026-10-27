@@ -297,6 +297,7 @@ export default function LearningHub() {
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
   const editingNoteIdRef = useRef(null)
+  const viewingNoteIdRef = useRef(null)
   // Images already fetched for a note (by note id) — reopening is instant.
   const noteImagesCache = useRef({})
 
@@ -567,7 +568,10 @@ export default function LearningHub() {
   }
   const closeNoteModal = () => { setNoteModal(null); setEditingNoteId(null); editingNoteIdRef.current = null }
 
+  const closeViewNote = () => { viewingNoteIdRef.current = null; setViewingNote(null); setViewImagesLoading(false); setViewImagesError(false) }
+
   const openViewNote = useCallback(async (note) => {
+    viewingNoteIdRef.current = note.id
     setViewImagesError(false)
     const cached = noteImagesCache.current[note.id]
     if (cached) {
@@ -581,13 +585,13 @@ export default function LearningHub() {
     try {
       const images = await fetchNoteImages(note.id)
       noteImagesCache.current[note.id] = images
+      if (viewingNoteIdRef.current !== note.id) return
       setViewingNote((prev) => (prev && prev.id === note.id ? { ...prev, images } : prev))
       setViewImagesLoading(false)
     } catch {
-      setViewingNote((prev) => {
-        if (prev && prev.id === note.id) { setViewImagesError(true); setViewImagesLoading(false) }
-        return prev
-      })
+      if (viewingNoteIdRef.current !== note.id) return
+      setViewImagesLoading(false)
+      setViewImagesError(true)
     }
   }, [])
 
@@ -653,9 +657,10 @@ export default function LearningHub() {
     const { error: delError } = await supabase.from('learning_notes').delete().eq('id', deletingNote.id)
     if (delError) { showToast({ type: 'error', title: 'Could not delete note', description: delError.message }); setDeletingNote(null); return }
     delete noteImagesCache.current[deletingNote.id]
+    const removedId = deletingNote.id
     setDeletingNote(null)
-    if (viewingNote?.id === deletingNote.id) setViewingNote(null)
-    setNotes((list) => list.filter((n) => n.id !== deletingNote.id))
+    if (viewingNote?.id === removedId) closeViewNote()
+    setNotes((list) => list.filter((n) => n.id !== removedId))
     await loadData({ silent: true })
     showToast({ type: 'success', title: 'Note deleted' })
   }
@@ -804,7 +809,7 @@ export default function LearningHub() {
             </Panel>
             <div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-bold"><span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-white"><Play size={13} fill="currentColor" /></span> Continue Learning</h2><span className="flex items-center gap-1.5 text-xs text-blue-600">{refreshing && <RefreshCw size={12} className="animate-spin" />}{filteredVideos.length} videos</span></div>
             {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{hasDataRef.current ? 'Connection problem — showing your last saved data.' : error} <button onClick={() => loadData()} className="ml-2 font-semibold underline">Retry</button><p className="mt-1 text-xs">{error}</p></div>}
-            {loading ? <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{[1,2,3].map((n) => <div key={n} className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={openViewNote} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
+            {loading ? <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{[1,2,3].map((n) => <div key={n} className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white" />)}</div> : filteredVideos.length === 0 ? <Panel className="p-10 text-center"><BookOpen className="mx-auto mb-3 text-slate-300" size={30} /><p className="font-semibold">No videos found</p><p className="mt-1 text-sm text-slate-500">Try another category or add a YouTube video.</p></Panel> : <div className="grid items-start gap-4 md:grid-cols-2 2xl:grid-cols-3">{filteredVideos.map((video) => <VideoCard key={video.id} video={video} notes={videoNotes(video.id)} onOpen={() => setActiveVideo(video)} onComplete={() => markCompleted(video)} onFavorite={() => updateProgress(video, { favorite: !video.favorite })} onNote={() => openNoteModal(video)} onViewNote={openViewNote} onEditNote={(note) => openNoteModal({ id: note.video_id, title: note.title }, note)} onEdit={() => openEditVideoModal(video)} onDelete={() => setDeletingVideo(video)} />)}</div>}
           </div>
           <aside className="flex flex-col gap-3">
             <Panel className="p-4">
@@ -922,7 +927,7 @@ export default function LearningHub() {
       </form>
     </Modal>}
 
-    {viewingNote && <Modal title={<span style={{ color: viewingNote.title_color || '#111827' }}>{viewingNote.note_title || viewingNote.title || 'Learning note'}</span>} onClose={() => setViewingNote(null)}>
+    {viewingNote && <Modal title={<span style={{ color: viewingNote.title_color || '#111827' }}>{viewingNote.note_title || viewingNote.title || 'Learning note'}</span>} onClose={closeViewNote}>
       <div className="space-y-3 rounded-xl p-3" style={{ background: viewingNote.bg_color || '#ffffff' }}>
         {(Array.isArray(viewingNote.blocks) ? viewingNote.blocks : []).map((b, i) => b.type === 'subtitle'
           ? <h4 key={i} className="text-base font-bold text-slate-800">{b.text}</h4>
@@ -947,7 +952,7 @@ export default function LearningHub() {
         )}
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <button onClick={() => { const n = viewingNote; setViewingNote(null); openNoteModal({ id: n.video_id, title: n.title }, n) }} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium hover:bg-slate-50">Edit</button>
+        <button onClick={() => { const n = viewingNote; closeViewNote(); openNoteModal({ id: n.video_id, title: n.title }, n) }} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium hover:bg-slate-50">Edit</button>
         <button onClick={() => setDeletingNote(viewingNote)} className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100">Delete</button>
       </div>
     </Modal>}
@@ -1044,13 +1049,26 @@ function Thumbnail({ video, small = false, large = false }) {
   if (large) return <div className="relative aspect-video overflow-hidden rounded-xl bg-slate-900">{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-200"><Video size={38} /></div>}</div>
   return <div className={`${small ? 'h-12 w-[72px]' : 'aspect-video'} relative shrink-0 overflow-hidden rounded-lg bg-slate-900`}>{src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-950 to-blue-900 text-blue-300"><Video size={small ? 16 : 26} /></div>}{!small && <span className="absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] text-white">{formatDuration(video.duration_seconds)}</span>}</div>
 }
+
+// Inline-styled 3-line clamp. Works on any Tailwind version (the
+// `line-clamp-3 block` combo breaks, because `block` overrides the
+// `-webkit-box` display that line-clamp needs).
+const CLAMP_3_STYLE = {
+  display: '-webkit-box',
+  WebkitLineClamp: 3,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+  whiteSpace: 'normal',
+  wordBreak: 'break-word',
+}
+
 function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, onViewNote, onEditNote, onEdit, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAllNotes, setShowAllNotes] = useState(false)
   const deadline = deadlineInfo(video)
   const deadlineTone = deadline?.tone === 'danger' ? 'bg-red-50 text-red-700' : deadline?.tone === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-600'
   const visibleNotes = showAllNotes ? notes : notes.slice(0, 2)
-  return <article className="rounded-xl border border-blue-100/80 bg-white p-3 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
+  return <article className="min-w-0 rounded-xl border border-blue-100/80 bg-white p-3 shadow-[0_2px_8px_rgba(37,99,235,0.05)] transition hover:-translate-y-0.5 hover:shadow-md">
     <button onClick={onOpen} className="group block w-full text-left"><div className="relative overflow-hidden rounded-lg"><Thumbnail video={video} /><span className="absolute inset-0 flex items-center justify-center bg-slate-950/0 text-white transition group-hover:bg-slate-950/20"><span className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 opacity-0 shadow-lg transition group-hover:opacity-100"><Play size={17} fill="currentColor" /></span></span></div></button>
     <div className="flex items-start gap-2 pt-3">
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700">{(video.channel || 'Y').slice(0,1).toUpperCase()}</div>
@@ -1093,14 +1111,16 @@ function VideoCard({ video, notes = [], onOpen, onComplete, onFavorite, onNote, 
       ) : (
         <div className="space-y-1.5">
           {visibleNotes.map((note) => (
-            <div key={note.id} className="flex items-start gap-1.5 rounded-lg border border-slate-100 px-2.5 py-2" style={{ background: note.bg_color || '#ffffff' }}>
+            <div key={note.id} className="flex items-start gap-1.5 overflow-hidden rounded-lg border border-slate-100 px-2.5 py-2" style={{ background: note.bg_color || '#ffffff' }}>
               <button onClick={() => onViewNote(note)} className="min-w-0 flex-1 text-left">
-                <span className="flex items-center gap-1.5">
-                  <span className="line-clamp-1 text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</span>
+                <div className="flex items-center gap-1.5">
+                  <div className="min-w-0 flex-1 truncate text-[11px] font-semibold" style={{ color: note.title_color || '#334155' }}>{note.note_title || 'Note'}</div>
                   {note.important && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">Important</span>}
-                </span>
-                <span className="line-clamp-3 block break-words text-[10px] leading-4 text-slate-500">{note.content || 'Image note'}</span>
-                <span className="mt-0.5 block text-[9px] text-slate-400">{new Date(note.created_at).toLocaleDateString()}</span>
+                </div>
+                <div className="text-[10px] leading-4 text-slate-500" style={CLAMP_3_STYLE}>
+                  {(note.content || 'Image note').replace(/\s+/g, ' ').trim()}
+                </div>
+                <div className="mt-0.5 text-[9px] text-slate-400">{new Date(note.created_at).toLocaleDateString()}</div>
               </button>
               <button onClick={() => onEditNote(note)} title="Edit note" className="shrink-0 rounded p-1 text-slate-400 hover:bg-white hover:text-blue-600"><Pencil size={12} /></button>
             </div>
