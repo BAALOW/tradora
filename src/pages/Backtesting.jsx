@@ -35,10 +35,43 @@ import { uploadToImageKit } from '../services/imagekitService'
 // Set to false if you ever want the Before / After screenshots to be optional.
 const REQUIRE_SCREENSHOTS = true
 
+// Default date window = last 4 years. Once the user picks their own dates
+// they are saved in localStorage and stay the same after refresh / leaving
+// the page, until the user changes them again.
+const DEFAULT_RANGE_YEARS = 4
+const DATE_RANGE_STORAGE_KEY = 'tradora_backtesting_date_range'
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
 const isBlank = (v) => String(v ?? '').trim() === ''
 
 function isoDate(d) {
   return d.toISOString().slice(0, 10)
+}
+
+function defaultDateRange() {
+  const today = new Date()
+  const start = new Date(today)
+  start.setFullYear(start.getFullYear() - DEFAULT_RANGE_YEARS)
+  return { start: isoDate(start), end: isoDate(today) }
+}
+
+function loadSavedDateRange() {
+  try {
+    const raw = window.localStorage.getItem(DATE_RANGE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (
+      parsed &&
+      DATE_RE.test(parsed.start) &&
+      DATE_RE.test(parsed.end) &&
+      parsed.start <= parsed.end
+    ) {
+      return parsed
+    }
+  } catch {
+    // ignore — fall back to the default range
+  }
+  return null
 }
 
 function deltaPct(current, previous) {
@@ -1056,13 +1089,24 @@ export default function Backtesting() {
   const [deletingTrade, setDeletingTrade] = useState(null)
 
   const today = new Date()
-  const defaultStart = new Date(today)
-  // Backtest trades are usually logged for historical dates far in the
-  // past, unlike the live Journal — default to a 1-year window instead
-  // of 30 days so recently-run backtests actually show up by default.
-  defaultStart.setDate(defaultStart.getDate() - 365)
-  const [startDate, setStartDate] = useState(isoDate(defaultStart))
-  const [endDate, setEndDate] = useState(isoDate(today))
+
+  // Date range: starts from the user's saved choice (kept across refresh
+  // and page changes). If nothing is saved yet, default to the last 4 years.
+  const [startDate, setStartDate] = useState(() => (loadSavedDateRange() ?? defaultDateRange()).start)
+  const [endDate, setEndDate] = useState(() => (loadSavedDateRange() ?? defaultDateRange()).end)
+
+  // Save the range every time the user changes it (only when both dates are valid).
+  useEffect(() => {
+    if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate) || startDate > endDate) return
+    try {
+      window.localStorage.setItem(
+        DATE_RANGE_STORAGE_KEY,
+        JSON.stringify({ start: startDate, end: endDate })
+      )
+    } catch {
+      // storage unavailable — range just won't persist
+    }
+  }, [startDate, endDate])
 
   useEffect(() => {
     if (accounts.length && !selectedAccount) setSelectedAccount(accounts[0])
