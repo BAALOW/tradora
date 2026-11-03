@@ -214,7 +214,7 @@ function computePipsStats(trades) {
 const resultTone = { WIN: 'success', LOSS: 'danger', BREAK_EVEN: 'neutral' }
 const resultLabel = { WIN: 'Win', LOSS: 'Loss', BREAK_EVEN: 'Breakeven' }
 const PIE_COLORS = { WIN: '#16A34A', LOSS: '#DC2626', BREAK_EVEN: '#9CA3AF' }
-const PAGE_SIZE = 12
+const PAGE_SIZE = 15
 const PAIR_OPTIONS = [
   { value: 'GBPUSD', label: 'GBPUSD' },
   { value: 'EURUSD', label: 'EURUSD' },
