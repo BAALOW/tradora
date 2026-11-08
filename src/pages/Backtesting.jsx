@@ -35,43 +35,14 @@ import { uploadToImageKit } from '../services/imagekitService'
 // Set to false if you ever want the Before / After screenshots to be optional.
 const REQUIRE_SCREENSHOTS = true
 
-// Default date window = last 4 years. Once the user picks their own dates
-// they are saved in localStorage and stay the same after refresh / leaving
-// the page, until the user changes them again.
-const DEFAULT_RANGE_YEARS = 4
-const DATE_RANGE_STORAGE_KEY = 'tradora_backtesting_date_range'
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-
 const isBlank = (v) => String(v ?? '').trim() === ''
 
-function isoDate(d) {
-  return d.toISOString().slice(0, 10)
-}
-
-function defaultDateRange() {
-  const today = new Date()
-  const start = new Date(today)
-  start.setFullYear(start.getFullYear() - DEFAULT_RANGE_YEARS)
-  return { start: isoDate(start), end: isoDate(today) }
-}
-
-function loadSavedDateRange() {
-  try {
-    const raw = window.localStorage.getItem(DATE_RANGE_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    if (
-      parsed &&
-      DATE_RE.test(parsed.start) &&
-      DATE_RE.test(parsed.end) &&
-      parsed.start <= parsed.end
-    ) {
-      return parsed
-    }
-  } catch {
-    // ignore — fall back to the default range
-  }
-  return null
+// Local (NOT UTC) YYYY-MM-DD — toISOString() can shift the day by one
+// depending on the timezone, so we build the string from local parts.
+function localIso(d) {
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
 }
 
 function deltaPct(current, previous) {
@@ -120,9 +91,7 @@ function weekStartKey(dateStr) {
   const d = parseLocalDate(dateStr)
   const day = d.getDay() // 0 = Sunday
   d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day))
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${mm}-${dd}`
+  return localIso(d)
 }
 
 function weekLabel(key) {
@@ -192,7 +161,7 @@ function computePipsStats(trades) {
     const windowVals = equityCurve.slice(Math.max(0, i - 2)).map((p) => p.equity).concat(running)
     const smooth = sum(windowVals) / windowVals.length
     equityCurve.push({
-      date: parseLocalDate(t.trade_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      date: parseLocalDate(t.trade_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }),
       equity: Number(running.toFixed(1)),
       balance: Number(smooth.toFixed(1)),
     })
@@ -214,7 +183,7 @@ function computePipsStats(trades) {
 const resultTone = { WIN: 'success', LOSS: 'danger', BREAK_EVEN: 'neutral' }
 const resultLabel = { WIN: 'Win', LOSS: 'Loss', BREAK_EVEN: 'Breakeven' }
 const PIE_COLORS = { WIN: '#16A34A', LOSS: '#DC2626', BREAK_EVEN: '#9CA3AF' }
-const PAGE_SIZE = 15
+const PAGE_SIZE = 12
 const PAIR_OPTIONS = [
   { value: 'GBPUSD', label: 'GBPUSD' },
   { value: 'EURUSD', label: 'EURUSD' },
@@ -529,7 +498,7 @@ function PerformanceSummaryCard({ stats, pipsStats }) {
 // trade type and result.
 const defaultFilters = { month: 'all', strategy: 'all', pair: 'all', direction: 'all', result: 'all' }
 
-function BacktestFilters({ filters, setFilters, months, strategies, pairs }) {
+function BacktestFilters({ filters, setFilters, months, strategies, pairs, onResetAll }) {
   const update = (key) => (e) => setFilters((f) => ({ ...f, [key]: e.target.value }))
   return (
     <div className="flex flex-wrap items-end gap-3">
@@ -543,7 +512,14 @@ function BacktestFilters({ filters, setFilters, months, strategies, pairs }) {
         options={[{ value: 'all', label: 'All Types' }, { value: 'Long', label: 'Long' }, { value: 'Short', label: 'Short' }]} />
       <Select label="Result" value={filters.result} onChange={update('result')} className="min-w-[140px]"
         options={[{ value: 'all', label: 'All Results' }, { value: 'WIN', label: 'Win' }, { value: 'LOSS', label: 'Loss' }, { value: 'BREAK_EVEN', label: 'Breakeven' }]} />
-      <Button variant="ghost" size="md" icon={RotateCcw} onClick={() => setFilters(defaultFilters)}>Reset</Button>
+      <Button
+        variant="ghost"
+        size="md"
+        icon={RotateCcw}
+        onClick={() => { setFilters(defaultFilters); onResetAll?.() }}
+      >
+        Reset
+      </Button>
     </div>
   )
 }
@@ -563,7 +539,7 @@ function BacktestTable({ trades, onView, onEdit, onDelete }) {
     return (
       <Card className="flex flex-col items-center justify-center gap-3 py-16 text-center">
         <p className="text-sm font-medium text-text-primary">No backtest trades match your filters</p>
-        <p className="text-sm text-text-muted">Log a backtest trade or adjust your filters.</p>
+        <p className="text-sm text-text-muted">Log a backtest trade or adjust your filters / date range.</p>
       </Card>
     )
   }
@@ -591,7 +567,7 @@ function BacktestTable({ trades, onView, onEdit, onDelete }) {
             {pageTrades.map((t, i) => (
               <tr key={t.id} className="border-b border-border/70 transition-colors last:border-0 hover:bg-surface">
                 <td className="py-3 pl-6 pr-4 text-text-muted">{(page - 1) * PAGE_SIZE + i + 1}</td>
-                <td className="py-3 pr-4 text-text-secondary">{new Date(t.trade_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                <td className="py-3 pr-4 text-text-secondary">{parseLocalDate(t.trade_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                 <td className="py-3 pr-4">
                   <span className={`inline-flex items-center gap-1 text-xs font-semibold ${t.direction === 'Long' ? 'text-success' : 'text-danger'}`}>
                     {t.direction === 'Long' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
@@ -842,15 +818,21 @@ function ScreenshotSlot({ label, required, error, dataUrl, onChange, onClear }) 
 
 // No accountId and no profit/loss field — backtesting isn't tied to a
 // live/demo account, and results are tracked in pips (SL/TP), not dollars.
-const emptyBtForm = {
+// Remembers the last date you saved a backtest trade with, so the next
+// "Log Backtest Trade" opens on that same date (not today). It lives at
+// module level, so it survives closing the form and navigating between
+// pages, and resets only when the browser page is refreshed.
+let lastBacktestDate = null
+
+const makeEmptyBtForm = () => ({
   strategy: '', pair: 'GBPUSD', direction: 'Long',
-  tradeDate: new Date().toISOString().slice(0, 10),
+  tradeDate: lastBacktestDate || localIso(new Date()),
   slPips: '', tpPips: '', result: 'WIN', notes: '',
-}
+})
 
 function LogBacktestForm({ open, onClose, onSubmit, submitting, trade }) {
   const isEdit = !!trade
-  const [form, setForm] = useState(emptyBtForm)
+  const [form, setForm] = useState(makeEmptyBtForm)
   const [errors, setErrors] = useState({})
   const [missing, setMissing] = useState([])
   const [before, setBefore] = useState(null)
@@ -867,7 +849,7 @@ function LogBacktestForm({ open, onClose, onSubmit, submitting, trade }) {
           strategy: trade.strategy || '',
           pair: trade.pair || 'GBPUSD',
           direction: trade.direction || 'Long',
-          tradeDate: trade.trade_date || emptyBtForm.tradeDate,
+          tradeDate: trade.trade_date || localIso(new Date()),
           slPips: trade.sl_pips ?? '',
           tpPips: trade.tp_pips ?? '',
           result: trade.result || 'WIN',
@@ -878,7 +860,7 @@ function LogBacktestForm({ open, onClose, onSubmit, submitting, trade }) {
         setBeforeFileId(trade.screenshot_before_file_id || null)
         setAfterFileId(trade.screenshot_after_file_id || null)
       } else {
-        setForm(emptyBtForm)
+        setForm(makeEmptyBtForm())
         setBefore(null)
         setAfter(null)
         setBeforeFileId(null)
@@ -944,6 +926,9 @@ function LogBacktestForm({ open, onClose, onSubmit, submitting, trade }) {
       formRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
       return
     }
+
+    // New trades only: remember this date for the next entry.
+    if (!isEdit) lastBacktestDate = form.tradeDate
 
     onSubmit({
       strategy: form.strategy.trim(),
@@ -1090,23 +1075,19 @@ export default function Backtesting() {
 
   const today = new Date()
 
-  // Date range: starts from the user's saved choice (kept across refresh
-  // and page changes). If nothing is saved yet, default to the last 4 years.
-  const [startDate, setStartDate] = useState(() => (loadSavedDateRange() ?? defaultDateRange()).start)
-  const [endDate, setEndDate] = useState(() => (loadSavedDateRange() ?? defaultDateRange()).end)
+  // Backtest trades are usually logged for historical dates far in the
+  // past. So the date range is EMPTY by default = All time. This keeps the
+  // table, KPIs, equity curve and Period Breakdown all showing the same data.
+  // The user can still pick a custom range, and clear it with "All time".
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+  const hasRange = !!(startDate || endDate)
 
-  // Save the range every time the user changes it (only when both dates are valid).
-  useEffect(() => {
-    if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate) || startDate > endDate) return
-    try {
-      window.localStorage.setItem(
-        DATE_RANGE_STORAGE_KEY,
-        JSON.stringify({ start: startDate, end: endDate })
-      )
-    } catch {
-      // storage unavailable — range just won't persist
-    }
-  }, [startDate, endDate])
+  const inRange = (t) =>
+    (!startDate || t.trade_date >= startDate) &&
+    (!endDate || t.trade_date <= endDate)
+
+  const resetDates = () => { setStartDate(''); setEndDate('') }
 
   useEffect(() => {
     if (accounts.length && !selectedAccount) setSelectedAccount(accounts[0])
@@ -1131,18 +1112,33 @@ export default function Backtesting() {
       return true
     })
 
+  // Filters + (optional) date range. Used by table, KPIs, curve, donut AND
+  // Period Breakdown so every widget agrees.
   const currentPeriod = useMemo(
-    () => applyFilters(allTrades).filter((t) => t.trade_date >= startDate && t.trade_date <= endDate),
+    () => applyFilters(allTrades).filter(inRange),
     [allTrades, filters, startDate, endDate]
   )
 
-  const periodLengthDays = Math.max(1, Math.round((new Date(endDate) - new Date(startDate)) / 86400000))
-  const prevEnd = new Date(startDate); prevEnd.setDate(prevEnd.getDate() - 1)
-  const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - periodLengthDays)
-  const previousPeriod = useMemo(
-    () => applyFilters(allTrades).filter((t) => t.trade_date >= isoDate(prevStart) && t.trade_date <= isoDate(prevEnd)),
-    [allTrades, filters, startDate]
+  // Table shows the newest trade first. Stats keep the original order so
+  // streak calculations in computeBacktestStats are not affected.
+  const tableTrades = useMemo(
+    () => [...currentPeriod].sort((a, b) => b.trade_date.localeCompare(a.trade_date)),
+    [currentPeriod]
   )
+
+  // Previous period only exists when BOTH dates are picked.
+  // Otherwise there is nothing to compare against and the % badges hide.
+  const previousPeriod = useMemo(() => {
+    if (!startDate || !endDate) return []
+    const len = Math.max(1, Math.round((parseLocalDate(endDate) - parseLocalDate(startDate)) / 86400000))
+    const pEnd = parseLocalDate(startDate)
+    pEnd.setDate(pEnd.getDate() - 1)
+    const pStart = new Date(pEnd)
+    pStart.setDate(pStart.getDate() - len)
+    const a = localIso(pStart)
+    const b = localIso(pEnd)
+    return applyFilters(allTrades).filter((t) => t.trade_date >= a && t.trade_date <= b)
+  }, [allTrades, filters, startDate, endDate])
 
   const stats = useMemo(() => computeBacktestStats(currentPeriod), [currentPeriod])
   const pipsStats = useMemo(() => computePipsStats(currentPeriod), [currentPeriod])
@@ -1219,9 +1215,29 @@ export default function Backtesting() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2 rounded-xl border border-border bg-white px-3 py-2">
-                <input type="date" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)} className="bg-transparent text-sm text-text-primary outline-none" />
+                <input
+                  type="date"
+                  value={startDate}
+                  max={endDate || undefined}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="bg-transparent text-sm text-text-primary outline-none"
+                />
                 <span className="text-text-muted">–</span>
-                <input type="date" value={endDate} min={startDate} max={isoDate(today)} onChange={(e) => setEndDate(e.target.value)} className="bg-transparent text-sm text-text-primary outline-none" />
+                <input
+                  type="date"
+                  value={endDate}
+                  min={startDate || undefined}
+                  max={localIso(today)}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="bg-transparent text-sm text-text-primary outline-none"
+                />
+                {hasRange ? (
+                  <button type="button" onClick={resetDates} className="text-xs font-medium text-brand hover:underline">
+                    All time
+                  </button>
+                ) : (
+                  <span className="text-xs font-medium text-text-muted">All time</span>
+                )}
               </div>
               <Button icon={Plus} onClick={() => setFormOpen(true)}>Log Backtest Trade</Button>
             </div>
@@ -1244,13 +1260,20 @@ export default function Backtesting() {
               <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
                 <div className="flex flex-col gap-6 lg:col-span-2">
                   <div className="rounded-2xl border border-border bg-card p-4 shadow-card">
-                    <BacktestFilters filters={filters} setFilters={setFilters} months={months} strategies={strategies} pairs={pairs} />
+                    <BacktestFilters
+                      filters={filters}
+                      setFilters={setFilters}
+                      months={months}
+                      strategies={strategies}
+                      pairs={pairs}
+                      onResetAll={resetDates}
+                    />
                   </div>
-                  <BacktestTable trades={currentPeriod} onView={(t) => setViewingId(t.id)} onEdit={handleEditClick} onDelete={setDeletingTrade} />
+                  <BacktestTable trades={tableTrades} onView={(t) => setViewingId(t.id)} onEdit={handleEditClick} onDelete={setDeletingTrade} />
                 </div>
 
                 <div className="flex flex-col gap-6">
-                  <PeriodBreakdownCard trades={applyFilters(allTrades)} />
+                  <PeriodBreakdownCard trades={currentPeriod} />
                   <PerformanceSummaryCard stats={stats} pipsStats={pipsStats} />
                   <Card className="flex flex-col gap-3 border-blue-100 bg-blue-50/40">
                     <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-100 text-brand">
