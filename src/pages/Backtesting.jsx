@@ -881,6 +881,8 @@ function LogBacktestForm({ open, onClose, onSubmit, submitting, trade }) {
   const set = (key) => (e) => {
     const value = e.target.value
     setForm((f) => ({ ...f, [key]: value }))
+    // Remember the date the moment it is picked (new trades only).
+    if (key === 'tradeDate' && !isEdit && value) lastBacktestDate = value
     clearError(key)
   }
 
